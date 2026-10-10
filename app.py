@@ -1,77 +1,47 @@
-from langchain.agents import create_agent
-from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from tools import web_search , scrape_url 
-from dotenv import load_dotenv
 
-load_dotenv()
+import streamlit as st
+from pipeline import run_research_pipeline
 
-#model setup 
-llm = ChatOpenAI(model = "gpt-4o-mini",temperature=0)
+st.set_page_config(
+    page_title="Multi-Agent Research Assistant",
+    page_icon="🔎",
+    layout="wide",
+)
 
+st.title("🔎 Multi-Agent Research Assistant")
+st.write(
+    "Research a topic using web search, webpage reading, "
+    "AI report writing, and critic review."
+)
 
-#1st agent 
-def build_search_agent():
-    return create_agent(
-        model = llm,
-        tools= [web_search]
-    )
+topic = st.text_area(
+    "Research topic",
+    placeholder="For example: Latest developments in agentic AI",
+    height=100,
+)
 
-#2nd agent 
+if st.button("Generate research report", type="primary"):
+    if not topic.strip():
+        st.warning("Please enter a research topic.")
+    else:
+        try:
+            with st.spinner("Research agents are working..."):
+                result = run_research_pipeline(topic.strip())
 
-def build_reader_agent():
-    return create_agent(
-        model = llm,
-        tools = [scrape_url]
-    )
+            st.success("Research completed!")
 
+            st.subheader("Research report")
+            st.markdown(result.get("report", "No report generated."))
 
-#writer chain 
+            st.subheader("Critic feedback")
+            st.markdown(result.get("feedback", "No feedback generated."))
 
-writer_prompt = ChatPromptTemplate.from_messages([
-    ("system", "You are an expert research writer. Write clear, structured and insightful reports."),
-    ("human", """Write a detailed research report on the topic below.
+            with st.expander("View search results"):
+                st.write(result.get("search_results", ""))
 
-Topic: {topic}
+            with st.expander("View scraped content"):
+                st.write(result.get("scraped_content", ""))
 
-Research Gathered:
-{research}
-
-Structure the report as:
-- Introduction
-- Key Findings (minimum 3 well-explained points)
-- Conclusion
-- Sources (list all URLs found in the research)
-
-Be detailed, factual and professional."""),
-])
-
-writer_chain = writer_prompt | llm | StrOutputParser()
-
-#critic_chain 
-
-critic_prompt = ChatPromptTemplate.from_messages([
-     ("system", "You are a sharp and constructive research critic. Be honest and specific."),
-    ("human", """Review the research report below and evaluate it strictly.
-
-Report:
-{report}
-
-Respond in this exact format:
-
-Score: X/10
-
-Strengths:
-- ...
-- ...
-
-Areas to Improve:
-- ...
-- ...
-
-One line verdict:
-..."""),
-])
-
-critic_chain = critic_prompt | llm | StrOutputParser()
+        except Exception as exc:
+            st.error("The research pipeline failed.")
+            st.exception(exc)
