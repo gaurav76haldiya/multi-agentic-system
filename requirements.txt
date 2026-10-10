@@ -2,6 +2,3 @@ requests
 beautifulsoup4
 python-dotenv
 streamlit
-langchain
-langchain-core
-langchain-google-genai
