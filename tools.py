@@ -1,22 +1,20 @@
 
 import os
-import time
+from urllib.parse import urlparse
 
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from langchain.tools import tool
 
 load_dotenv()
 
-FREESEA_URL = "https://freesea.dev/v1/search"
-SEARCH_TIMEOUT = 30
+TIMEOUT = 20
 
 
 def get_setting(name, default=None):
-    """Read configuration from environment variables or Streamlit secrets."""
     value = os.getenv(name)
+
     if value:
         return value
 
@@ -26,141 +24,100 @@ def get_setting(name, default=None):
         return default
 
 
-@tool
-def web_search(query: str) -> str:
-    """Search Freesea for recent information. Returns titles, URLs and snippets."""
-    api_key = get_setting("FREESEA_API_KEY")
+def web_search(query: str) -> list:
+    """Search using a SearXNG instance and return normalized sources."""
 
-    if not api_key:
-        return (
-            "Web search is unavailable: FREESEA_API_KEY is missing. "
-            "Configure it in .env or Streamlit Community Cloud Secrets."
+    base_url = get_setting("SEARXNG_URL")
+
+    if not base_url:
+        raise RuntimeError(
+            "SEARXNG_URL is missing. Configure your SearXNG instance URL."
         )
 
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
+    base_url = base_url.rstrip("/")
 
-    payload = {
-        "query": query,
-        "max_results": 5,
-    }
-
-    data = None
-
-    # Freesea recommends waiting for Retry-After and retrying once on 429.
-    for attempt in range(2):
-        try:
-            response = requests.post(
-                FREESEA_URL,
-                headers=headers,
-                json=payload,
-                timeout=SEARCH_TIMEOUT,
-            )
-
-            if response.status_code == 429:
-                if attempt == 1:
-                    return (
-                        "Freesea search is temporarily rate-limited after "
-                        "one retry. No search results were retrieved. "
-                        "Please wait and run the research again. Details: "
-                        + response.text[:300]
-                    )
-
-                retry_after = response.headers.get("Retry-After", "2")
-
-                try:
-                    wait_seconds = max(1.0, float(retry_after))
-                except (TypeError, ValueError):
-                    wait_seconds = 2.0
-
-                time.sleep(wait_seconds)
-                continue
-
-            response.raise_for_status()
-            data = response.json()
-            break
-
-        except requests.RequestException as exc:
-            status = (
-                exc.response.status_code
-                if exc.response is not None
-                else "network error"
-            )
-            details = (
-                exc.response.text[:300]
-                if exc.response is not None
-                else str(exc)
-            )
-            return f"Freesea search failed ({status}): {details}"
-
-        except ValueError:
-            return "Freesea returned an invalid JSON response."
-
-    if not isinstance(data, dict):
-        return "Freesea returned no usable search response."
-
-    results = (
-        data.get("results")
-        or data.get("data")
-        or data.get("items")
-        or []
-    )
-
-    if not isinstance(results, list) or not results:
-        return (
-            f"Freesea returned no search results for: {query}. "
-            "Do not invent sources."
+    try:
+        response = requests.get(
+            f"{base_url}/search",
+            params={
+                "q": query,
+                "format": "json",
+                "language": "en",
+                "safesearch": 1,
+            },
+            headers={"User-Agent": "MultiAgentResearchApp/1.0"},
+            timeout=TIMEOUT,
         )
 
-    output = []
+        if response.status_code == 403:
+            raise RuntimeError(
+                "SearXNG returned 403. JSON output may be disabled "
+                "on this instance."
+            )
+
+        response.raise_for_status()
+        data = response.json()
+
+    except requests.RequestException as exc:
+        raise RuntimeError(
+            f"Could not connect to SearXNG: {exc}"
+        ) from exc
+    except ValueError as exc:
+        raise RuntimeError(
+            "SearXNG did not return JSON. Check SEARXNG_URL and "
+            "whether the instance supports format=json."
+        ) from exc
+
+    results = data.get("results", [])
+
+    sources = []
 
     for item in results:
-        if not isinstance(item, dict):
+        url = str(item.get("url", "")).strip()
+
+        if not url:
             continue
 
-        title = item.get("title") or item.get("name") or "Untitled"
-        url = item.get("url") or item.get("link") or ""
-        snippet = (
-            item.get("content")
-            or item.get("snippet")
-            or item.get("description")
-            or item.get("text")
-            or ""
-        )
+        sources.append({
+            "title": item.get("title", "Untitled"),
+            "url": url,
+            "snippet": item.get("content", ""),
+            "content": item.get("content", ""),
+        })
 
-        if url:
-            output.append(
-                f"Title: {title}\n"
-                f"URL: {url}\n"
-                f"Snippet: {str(snippet)[:500]}\n"
-            )
-
-    if not output:
-        return "Freesea returned results without usable URLs."
-
-    return "\n----\n".join(output)
+    return sources
 
 
-@tool
 def scrape_url(url: str) -> str:
-    """Scrape and return clean text content from a URL for deeper reading."""
+    """Fetch a web page and extract readable text."""
+
+    parsed = urlparse(url)
+
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError("Only valid HTTP and HTTPS URLs are supported.")
+
     try:
         response = requests.get(
             url,
-            timeout=15,
-            headers={"User-Agent": "Mozilla/5.0"},
+            headers={"User-Agent": "Mozilla/5.0 (compatible; ResearchBot/1.0)"},
+            timeout=TIMEOUT,
         )
         response.raise_for_status()
 
-        soup = BeautifulSoup(response.text, "html.parser")
+    except requests.RequestException as exc:
+        raise RuntimeError(
+            f"Could not fetch source page: {exc}"
+        ) from exc
 
-        for tag in soup(["script", "style", "nav", "footer"]):
-            tag.decompose()
+    soup = BeautifulSoup(response.text, "html.parser")
 
-        return soup.get_text(separator=" ", strip=True)[:3000]
+    for element in soup([
+        "script", "style", "nav", "footer", "header",
+        "noscript", "svg", "form",
+    ]):
+        element.decompose()
 
-    except Exception as exc:
-        return f"Could not scrape URL: {exc}"
+    text = soup.get_text(separator="\n", strip=True)
+
+    # Avoid sending excessively large pages to Gemini.
+    return text[:15000]
