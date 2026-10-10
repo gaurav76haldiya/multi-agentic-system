@@ -1,74 +1,58 @@
-from agents import build_reader_agent , build_search_agent , writer_chain , critic_chain
 
-def run_research_pipeline(topic : str) -> dict:
-
-    state = {}
-
-    #search agent working 
-    print("\n"+" ="*50)
-    print("step 1 - search agent is working ...")
-    print("="*50)
-
-    search_agent = build_search_agent()
-    search_result = search_agent.invoke({
-        "messages" : [("user", f"Find recent, reliable and detailed information about: {topic}")]
-    })
-    state["search_results"] = search_result['messages'][-1].content
-
-    print("\n search result ",state['search_results'])
-
-    #step 2 - reader agent 
-    print("\n"+" ="*50)
-    print("step 2 - Reader agent is scraping top resources ...")
-    print("="*50)
-
-    reader_agent = build_reader_agent()
-    reader_result = reader_agent.invoke({
-        "messages": [("user",
-            f"Based on the following search results about '{topic}', "
-            f"pick the most relevant URL and scrape it for deeper content.\n\n"
-            f"Search Results:\n{state['search_results'][:800]}"
-        )]
-    })
-
-    state['scraped_content'] = reader_result['messages'][-1].content
-
-    print("\nscraped content: \n", state['scraped_content'])
-
-    #step 3 - writer chain 
-
-    print("\n"+" ="*50)
-    print("step 3 - Writer is drafting the report ...")
-    print("="*50)
-
-    research_combined = (
-        f"SEARCH RESULTS : \n {state['search_results']} \n\n"
-        f"DETAILED SCRAPED CONTENT : \n {state['scraped_content']}"
-    )
-
-    state["report"] = writer_chain.invoke({
-        "topic" : topic,
-        "research" : research_combined
-    })
-
-    print("\n Final Report\n",state['report'])
-
-    #critic report 
-
-    print("\n"+" ="*50)
-    print("step 4 - critic is reviewing the report ")
-    print("="*50)
-
-    state["feedback"] = critic_chain.invoke({
-        "report":state['report']
-    })
-
-    print("\n critic report \n", state['feedback'])
-
-    return state
+from agents import create_research_plan, review_report, write_report
+from config import AppConfig
+from tools import search_web
 
 
+def run_research_pipeline(
+    topic: str,
+    config: AppConfig,
+) -> dict:
+    topic = topic.strip()
 
-if __name__ == "__main__":
-    topic = input("\n Enter a research topic : ")
-    run_research_pipeline(topic)
+    if not topic:
+        raise ValueError("Research topic cannot be empty.")
+
+    # Agent 1: create the research plan.
+    plan = create_research_plan(topic, config)
+
+    # Search different aspects of the topic.
+    queries = [
+        topic,
+        f"{topic} recent developments and evidence",
+        f"{topic} challenges, limitations and risks",
+    ]
+
+    # Remove duplicate URLs from results.
+    sources_by_url = {}
+
+    for query in queries:
+        results = search_web(query, config)
+
+        for source in results:
+            url = source.get("url", "").strip()
+
+            if url:
+                sources_by_url.setdefault(url, source)
+
+    sources = list(sources_by_url.values())
+
+    if not sources:
+        raise RuntimeError(
+            "No usable search results were returned by Freesea. "
+            "Try a different topic or check your search API configuration."
+        )
+
+    # Agent 2: write the research report.
+    draft = write_report(topic, plan, sources, config)
+
+    # Agent 3: review and refine the draft.
+    final_report = review_report(topic, draft, config)
+
+    return {
+        "topic": topic,
+        "plan": plan,
+        "sources": sources,
+        "draft": draft,
+        "report": final_report,
+    }
